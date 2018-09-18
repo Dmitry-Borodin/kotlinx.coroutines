@@ -4,14 +4,15 @@
 
 package kotlinx.coroutines.experimental.rx1
 
+import kotlinx.coroutines.experimental.*
 import rx.Scheduler
-import kotlinx.coroutines.experimental.CancellableContinuation
-import kotlinx.coroutines.experimental.CoroutineDispatcher
-import kotlinx.coroutines.experimental.Delay
-import kotlinx.coroutines.experimental.DisposableHandle
 import rx.Subscription
+import rx.functions.Action0
+import rx.subscriptions.Subscriptions
+import java.util.*
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.experimental.CoroutineContext
+import kotlin.coroutines.experimental.EmptyCoroutineContext
 
 /**
  * Converts an instance of [Scheduler] to an implementation of [CoroutineDispatcher]
@@ -29,16 +30,16 @@ public class SchedulerCoroutineDispatcher(private val scheduler: Scheduler) : Co
     }
 
     override fun scheduleResumeAfterDelay(time: Long, unit: TimeUnit, continuation: CancellableContinuation<Unit>) =
-        scheduler.createWorker()
-                .schedule({
-                    with(continuation) { resumeUndispatched(Unit) }
-                 }, time, unit)
-                .let { subscription ->
-                    continuation.unsubscribeOnCancellation(subscription)
-                }
+            scheduler.createWorker()
+                    .schedule({
+                        with(continuation) { resumeUndispatched(Unit) }
+                    }, time, unit)
+                    .let { subscription ->
+                        continuation.unsubscribeOnCancellation(subscription)
+                    }
 
     override fun invokeOnTimeout(time: Long, unit: TimeUnit, block: Runnable): DisposableHandle =
-        scheduler.createWorker().schedule({ block.run() }, time, unit).asDisposableHandle()
+            scheduler.createWorker().schedule({ block.run() }, time, unit).asDisposableHandle()
 
     private fun Subscription.asDisposableHandle(): DisposableHandle = object : DisposableHandle {
         override fun dispose() = unsubscribe()
@@ -48,3 +49,46 @@ public class SchedulerCoroutineDispatcher(private val scheduler: Scheduler) : Co
     override fun equals(other: Any?): Boolean = other is SchedulerCoroutineDispatcher && other.scheduler === scheduler
     override fun hashCode(): Int = System.identityHashCode(scheduler)
 }
+
+public fun CoroutineDispatcher.asRxScheduler() = CoroutineDispatherScheduler(this)
+
+public class CoroutineDispatherScheduler(private val dispatcher: CoroutineDispatcher) : Scheduler {
+
+    override fun createWorker(): Worker = CoroutineDispatchedWorker(dispatcher)
+
+    internal inner class CoroutineDispatchedWorker(private val dispatcher: CoroutineDispatcher) : Scheduler.Worker() {
+
+        @Volatile
+        private var _isUnsubscribed = false
+
+        override fun schedule(action: Action0?): Subscription {
+            dispatcher.dispatch(EmptyCoroutineContext, Runnable { action?.call() })
+            return this
+        }
+
+        override fun schedule(action: Action0?, delayTime: Long, unit: TimeUnit?): Subscription {
+            if (isUnsubscribed) {
+                return Subscriptions.unsubscribed()
+            }
+
+            if (dispatcher is Delay) {
+                dispatcher.delay(delayTime, unit)
+            } else{
+                Timer().schedule(object : TimerTask() {schedule(action)}, unit.toMillis(delayTime))
+
+                Thread.sleep(unit.toMillis(delayTime))
+            }
+                dispatcher.dispatch(EmptyCoroutineContext, Runnable { action?.call() })
+                return this
+
+        }
+
+        override fun isUnsubscribed(): Boolean = _isUnsubscribed
+
+        override fun unsubscribe() {
+            dispatcher.cancel()
+            _isUnsubscribed = true
+        }
+    }
+}
+
